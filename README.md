@@ -1,6 +1,10 @@
+
+# UNZIP train/v8_git_log2.zip FIRST
+This db file's size exceeds Github limit, so it is ziped and split into 50MB parts, you need to extract them before use. 
+
 # Project cluster (with preprocessed V8)
 
-This directory provides an offline, reproducible defender pipeline:
+This provides an offline, reproducible defender pipeline:
 
 1. Train relation model from V8 git history.
 2. Infer mitigation JSFlags from a patch.
