@@ -172,100 +172,6 @@ class CliOutputTest(unittest.TestCase):
         self.assertNotIn("06/07", text)
         self.assertNotIn("[runme]", text)
 
-    @mock.patch("runme.time.sleep")
-    def test_showtime_tty_uses_sleep_for_padding(self, sleep_mock: mock.Mock) -> None:
-        stream = _FakeTTYStream()
-        renderer = runme.InferProgressRenderer(stream=stream, showtime=True)
-        renderer._showtime_stage_budgets["input_scan"] = 0.05
-
-        renderer.handle_event(
-            {
-                "event": "step_start",
-                "step": 1,
-                "stage_key": "input_scan",
-                "stage_name": "Input Scan",
-                "phase": "thinking",
-                "message": "checking input files...",
-            }
-        )
-        renderer.handle_event(
-            {
-                "event": "step_end",
-                "step": 1,
-                "stage_key": "input_scan",
-                "stage_name": "Input Scan",
-                "phase": "thinking",
-                "summary": "inputs ready",
-                "elapsed_ms": 0,
-                "metrics": {"model": "ok"},
-            }
-        )
-        renderer.close()
-
-        self.assertTrue(sleep_mock.called)
-
-    @mock.patch("runme.time.sleep")
-    def test_non_tty_showtime_does_not_pad(self, sleep_mock: mock.Mock) -> None:
-        stream = StringIO()
-        renderer = runme.InferProgressRenderer(stream=stream, showtime=True)
-
-        renderer.handle_event(
-            {
-                "event": "step_start",
-                "step": 1,
-                "stage_key": "input_scan",
-                "stage_name": "Input Scan",
-                "phase": "thinking",
-                "message": "checking input files...",
-            }
-        )
-        renderer.handle_event(
-            {
-                "event": "step_end",
-                "step": 1,
-                "stage_key": "input_scan",
-                "stage_name": "Input Scan",
-                "phase": "thinking",
-                "summary": "inputs ready",
-                "elapsed_ms": 0,
-                "metrics": {"model": "ok"},
-            }
-        )
-        renderer.close()
-
-        self.assertFalse(sleep_mock.called)
-
-    @mock.patch("runme.time.sleep")
-    def test_default_mode_no_showtime_padding(self, sleep_mock: mock.Mock) -> None:
-        stream = _FakeTTYStream()
-        renderer = runme.InferProgressRenderer(stream=stream, showtime=False)
-
-        renderer.handle_event(
-            {
-                "event": "step_start",
-                "step": 1,
-                "stage_key": "input_scan",
-                "stage_name": "Input Scan",
-                "phase": "thinking",
-                "message": "checking input files...",
-            }
-        )
-        renderer.handle_event(
-            {
-                "event": "step_end",
-                "step": 1,
-                "stage_key": "input_scan",
-                "stage_name": "Input Scan",
-                "phase": "thinking",
-                "summary": "inputs ready",
-                "elapsed_ms": 0,
-                "metrics": {"model": "ok"},
-            }
-        )
-        renderer.close()
-
-        self.assertFalse(sleep_mock.called)
-
     @mock.patch("runme.infer_patch")
     def test_cmd_infer_default_stdout_summary_only(self, infer_patch_mock: mock.Mock) -> None:
         infer_patch_mock.return_value = self.result
@@ -275,7 +181,6 @@ class CliOutputTest(unittest.TestCase):
             top_k=3,
             out="",
             html_out="",
-            showtime=False,
         )
 
         output = StringIO()
