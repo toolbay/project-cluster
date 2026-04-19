@@ -6,7 +6,6 @@ import os
 import shutil
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, IO, List, Optional, Sequence
 
@@ -14,16 +13,6 @@ from lib.constants import DEFAULT_HISTORY_DB, DEFAULT_MODEL_DB
 from lib.inferencer import infer_patch
 from lib.model_store import inspect_model
 from lib.trainer import train_model
-
-SHOWTIME_STAGE_BUDGETS = {
-    "input_scan": 5.0,
-    "model_sync": 8.0,
-    "patch_decode": 7.0,
-    "feature_projection": 16.0,
-    "candidate_scoring": 14.0,
-    "rank_decision": 6.0,
-    "result_packaging": 4.0,
-}
 
 STAGE_NAME_BY_STEP = {
     1: "Input Scan",
@@ -120,8 +109,7 @@ def _render_table(
 
 
 class InferProgressRenderer:
-    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-    _SHOWTIME_FRAMES = ("◇", "◆", "◈", "◆")
+    _RUNNING_ICON = "..."
     _PHASE_COLORS = {
         "thinking": "96",
         "reading": "94",
@@ -130,19 +118,14 @@ class InferProgressRenderer:
         "shipping": "92",
     }
 
-    def __init__(self, stream: Optional[IO[str]] = None, showtime: bool = False) -> None:
+    def __init__(self, stream: Optional[IO[str]] = None) -> None:
         self.stream = stream if stream is not None else sys.stdout
         self.is_tty = bool(getattr(self.stream, "isatty", lambda: False)())
         self.use_color = self.is_tty and os.environ.get("NO_COLOR") is None
         self.use_unicode = _supports_unicode(self.stream)
-        self.showtime = showtime
-        self._showtime_stage_budgets = dict(SHOWTIME_STAGE_BUDGETS)
 
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
-
-        self._spinner_stop: Optional[threading.Event] = None
-        self._spinner_thread: Optional[threading.Thread] = None
 
         self._active_step: Optional[Dict[str, object]] = None
         self._live_message = ""
@@ -160,7 +143,8 @@ class InferProgressRenderer:
             self._on_step_progress(event)
 
     def close(self) -> None:
-        self._stop_spinner(clear_line=True)
+        if self.is_tty:
+            self._write_tty_line("", newline=False)
 
     def _stage_name(self, event: Dict[str, object]) -> str:
         if event.get("stage_name"):
@@ -174,19 +158,12 @@ class InferProgressRenderer:
             return f"1-{step}"
         return "1-?"
 
-    def _stage_key(self, event: Dict[str, object]) -> str:
-        key = event.get("stage_key")
-        if key:
-            return str(key)
-        return self._stage_name(event).lower().replace(" ", "_")
-
     def _on_step_start(self, event: Dict[str, object]) -> None:
         stage_id = self._stage_id(event)
         stage_name = self._stage_name(event)
         phase = str(event.get("phase", "thinking"))
         message = str(event.get("message", ""))
 
-        self._stop_spinner(clear_line=False)
         separator = self._render_stage_separator(stage_id, stage_name)
         self._write_line("")
         self._write_line(self._color(separator, "95"))
@@ -202,38 +179,28 @@ class InferProgressRenderer:
             self._live_progress = ""
 
         if self.is_tty:
-            self._start_spinner(stage_id=stage_id, stage_name=stage_name, phase=phase)
+            self._render_live_line()
             return
 
-        line = self._format_running_line(stage_id, stage_name, phase, message, spinner="...")
+        line = self._format_running_line(
+            stage_id,
+            stage_name,
+            phase,
+            message,
+            spinner=self._RUNNING_ICON,
+        )
         self._write_line(line)
 
     def _on_step_end(self, event: Dict[str, object]) -> None:
         stage_id = self._stage_id(event)
         stage_name = self._stage_name(event)
-        stage_key = self._stage_key(event)
-        phase = str(event.get("phase", "thinking"))
         summary = str(event.get("summary", "done"))
         elapsed_ms = int(event.get("elapsed_ms", 0))
         metrics = event.get("metrics")
         metrics_text = self._format_metrics(metrics if isinstance(metrics, dict) else None)
 
-        self._stop_spinner(clear_line=False)
-
-        pad_ms = 0
-        if self.showtime and self.is_tty:
-            budget_sec = float(self._showtime_stage_budgets.get(stage_key, 0.0))
-            remaining_sec = budget_sec - (elapsed_ms / 1000.0)
-            if remaining_sec > 0.02:
-                pad_ms = self._play_showtime_fill(stage_id, stage_name, phase, remaining_sec)
-
         done_icon = self._color("OK", "92") if self.is_tty else "OK"
-        total_ms = elapsed_ms + pad_ms
-
-        timing = f"compute={elapsed_ms}ms"
-        if pad_ms > 0:
-            timing += f", showtime={pad_ms}ms"
-        timing += f", total={total_ms}ms"
+        timing = f"compute={elapsed_ms}ms, total={elapsed_ms}ms"
 
         status = f"Status • {stage_id} • {stage_name} • {done_icon} • {summary}"
         if metrics_text:
@@ -246,6 +213,7 @@ class InferProgressRenderer:
             self._write_line(status)
 
         with self._state_lock:
+            self._active_step = None
             self._live_progress = ""
 
     def _on_step_detail(self, event: Dict[str, object]) -> None:
@@ -260,20 +228,17 @@ class InferProgressRenderer:
         if not lines and not isinstance(table, dict) and not isinstance(panel, dict):
             return
 
-        should_resume_spinner = self.is_tty and self._spinner_thread is not None
-        active = None
-        if should_resume_spinner:
+        should_resume_live = False
+        if self.is_tty:
             with self._state_lock:
-                active = dict(self._active_step or {})
-            self._stop_spinner(clear_line=False)
+                should_resume_live = self._active_step is not None
+            if should_resume_live:
+                self._write_tty_line("", newline=False)
 
         self._print_detail_block(stage_id, stage_name, title, lines, table, panel)
 
-        if should_resume_spinner and active:
-            stage_id = str(active.get("stage_id", stage_id))
-            stage_name = str(active.get("stage_name", stage_name))
-            phase = str(active.get("phase", "thinking"))
-            self._start_spinner(stage_id=stage_id, stage_name=stage_name, phase=phase)
+        if should_resume_live:
+            self._render_live_line()
 
     def _on_step_progress(self, event: Dict[str, object]) -> None:
         stage_id = self._stage_id(event)
@@ -295,71 +260,32 @@ class InferProgressRenderer:
         if self.is_tty:
             with self._state_lock:
                 self._live_progress = progress_text
+            self._render_live_line()
             return
 
         self._write_line(f"Progress • {stage_id} • {stage_name} • {progress_text}")
 
-    def _start_spinner(self, stage_id: str, stage_name: str, phase: str) -> None:
-        stop_event = threading.Event()
-        self._spinner_stop = stop_event
-        self._spinner_thread = threading.Thread(
-            target=self._spinner_loop,
-            args=(stage_id, stage_name, phase, stop_event),
-            daemon=True,
-        )
-        self._spinner_thread.start()
+    def _render_live_line(self) -> None:
+        if not self.is_tty:
+            return
 
-    def _spinner_loop(
-        self,
-        stage_id: str,
-        stage_name: str,
-        phase: str,
-        stop_event: threading.Event,
-    ) -> None:
-        index = 0
-        while not stop_event.is_set():
-            with self._state_lock:
-                message = self._live_message
-                progress = self._live_progress
+        with self._state_lock:
+            active = dict(self._active_step or {})
+            message = self._live_message
+            progress = self._live_progress
 
-            spinner = self._color(self._SPINNER_FRAMES[index % len(self._SPINNER_FRAMES)], "96")
-            line = self._format_running_line(stage_id, stage_name, phase, message, spinner)
-            if progress:
-                line += f" • {progress}"
-            self._write_tty_line(line, newline=False)
+        if not active:
+            self._write_tty_line("", newline=False)
+            return
 
-            index += 1
-            stop_event.wait(0.09)
-
-    def _play_showtime_fill(
-        self,
-        stage_id: str,
-        stage_name: str,
-        phase: str,
-        remaining_sec: float,
-    ) -> int:
-        start = time.perf_counter()
-        deadline = start + remaining_sec
-        index = 0
-
-        while True:
-            now = time.perf_counter()
-            if now >= deadline:
-                break
-            left = max(0.0, deadline - now)
-            ratio = 1.0 - (left / max(remaining_sec, 1e-6))
-            bar = self._progress_bar(ratio, width=16)
-            pulse = self._color(self._SHOWTIME_FRAMES[index % len(self._SHOWTIME_FRAMES)], "95")
-            line = (
-                f"Showtime • {stage_id} • {stage_name} • {pulse} • {phase} • "
-                f"projection pulse {bar} {left:4.1f}s"
-            )
-            self._write_tty_line(line, newline=False)
-            index += 1
-            time.sleep(min(0.09, left))
-
-        self._write_tty_line("", newline=False)
-        return int((time.perf_counter() - start) * 1000)
+        stage_id = str(active.get("stage_id", "1-?"))
+        stage_name = str(active.get("stage_name", ""))
+        phase = str(active.get("phase", "thinking"))
+        spinner = self._color(self._RUNNING_ICON, "96")
+        line = self._format_running_line(stage_id, stage_name, phase, message, spinner)
+        if progress:
+            line += f" • {progress}"
+        self._write_tty_line(line, newline=False)
 
     def _format_running_line(
         self,
@@ -379,12 +305,6 @@ class InferProgressRenderer:
         if not metrics:
             return ""
         return ", ".join(f"{key}={value}" for key, value in metrics.items())
-
-    def _progress_bar(self, ratio: float, width: int = 14) -> str:
-        r = min(1.0, max(0.0, ratio))
-        filled = int(round(r * width))
-        empty = max(0, width - filled)
-        return f"[{'█' * filled}{'░' * empty}]"
 
     def _print_detail_block(
         self,
@@ -422,18 +342,6 @@ class InferProgressRenderer:
                 rendered = _render_table(headers, rows, use_unicode=self.use_unicode)
                 for line in rendered:
                     self._write_line(f"  {line}")
-
-    def _stop_spinner(self, clear_line: bool) -> None:
-        if self._spinner_stop is not None:
-            self._spinner_stop.set()
-        if self._spinner_thread is not None and self._spinner_thread.is_alive():
-            self._spinner_thread.join(timeout=0.2)
-
-        self._spinner_stop = None
-        self._spinner_thread = None
-
-        if self.is_tty and clear_line:
-            self._write_tty_line("", newline=False)
 
     def _write_tty_line(self, text: str, newline: bool) -> None:
         with self._write_lock:
@@ -673,7 +581,7 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def cmd_infer(args: argparse.Namespace) -> int:
-    renderer = InferProgressRenderer(showtime=args.showtime)
+    renderer = InferProgressRenderer()
     try:
         result = infer_patch(
             model_db_path=args.model_db,
@@ -755,12 +663,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--html-out",
         default="",
         help="Write readable HTML report to this path",
-    )
-    infer_parser.add_argument(
-        "--showtime",
-        action="store_true",
-        default=False,
-        help="Enable 60s stage-paced demo mode (TTY only)",
     )
     infer_parser.set_defaults(func=cmd_infer)
 
