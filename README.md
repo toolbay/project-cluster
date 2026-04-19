@@ -25,14 +25,14 @@ No Time to Patch: Faster Detection and Counteraction of N-day Exploits in Chromi
 Use Chromium depot tools vpython:
 
 ```bash
-/home/shuni/code/chromium/depot_tools/vpython3 --version
+/home/foo/code/chromium/depot_tools/vpython3 --version
 ```
 
 ## Train
 
 ```bash
-/home/shuni/code/chromium/depot_tools/vpython3 runme.py train \
-  --v8-repo /home/shuni/code/v8/main/v8 \
+/home/foo/code/chromium/depot_tools/vpython3 runme.py train \
+  --v8-repo /home/foo/code/v8/main/v8 \
   --history-db ./train/v8_git_log2.db \
   --model-db ./model/jsflags_defender_model.db \
   --reuse-db
@@ -46,27 +46,17 @@ Notes:
 ## Infer
 
 ```bash
-/home/shuni/code/chromium/depot_tools/vpython3 runme.py infer \
+/home/foo/code/chromium/depot_tools/vpython3 runme.py infer \
   --model-db ./model/jsflags_defender_model.db \
-  --patch ../0001-Reland-interpreter-Enable-TDZ-elision-by-default.patch \
+  --patch ../CVE-2026-xxx.patch \
   --top-k 5 \
   --out ./model/sample_infer.json \
   --html-out ./model/sample_infer.html
 ```
 
-Demo mode (stage-paced, about 60s in TTY):
-
-```bash
-/home/shuni/code/chromium/depot_tools/vpython3 runme.py infer \
-  --model-db ./model/jsflags_defender_model.db \
-  --patch ../0001-Reland-interpreter-Enable-TDZ-elision-by-default.patch \
-  --top-k 5 \
-  --showtime
-```
-
 Inference stdout always prints:
 
-- 7-step progress logs (TTY: animated; non-TTY: static)
+- 7-step progress logs (TTY: live in-place; non-TTY: static)
 - per-step detail blocks (`step_detail`) and progress updates (`step_progress`)
 - short Top3 summary:
 
